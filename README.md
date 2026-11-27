@@ -1,5 +1,8 @@
 # Portrait des communes du Parc national des Pyrénées
 
+## La Carte à visionner juste ici
+https://samledecodeur-del.github.io/Portrait-des-communes-du-Parc-national-des-Pyr-n-es/
+
 ## Choix
 
 - **Sélection des communes (`SEUIL_PARC`) :** une commune est retenue si au moins **0,5 %** (`0.005`) de sa surface est dans le Parc (cœur + aire d'adhésion) sur le tracé précis. Sur les 107 communes ayant une intersection non nulle avec le Parc sur ce tracé, les 38 premières ont des parts minuscules (à partir d'environ `0,000000008 %` et moins de `0,001 km²` intersectés), correspondant à des éclats liés au décalage entre limites IGN et DREAL. Classées par part dans le Parc croissante, les valeurs bondissent nettement à la 39ᵉ ligne avec Lescun (environ `11,81 %`, soit `7,29 km²`). On retient ainsi **69 communes** (contrôle réalisé à partir du CSV généré et inspecté dans VS Code).
