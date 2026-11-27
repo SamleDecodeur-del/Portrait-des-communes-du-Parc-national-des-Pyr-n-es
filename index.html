@@ -1,0 +1,304 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Communes du Parc national des Pyrénées</title>
+  <!-- Icône vide : évite une requête favicon.ico en erreur 404 -->
+  <link rel="icon" href="data:,">
+
+  <!-- Versions épinglées : MapLibre (feuille de style ici, module plus bas) et PMTiles (variable globale « pmtiles ») -->
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@6.16.0/dist/maplibre-gl.css">
+  <script src="https://unpkg.com/pmtiles@4.5.0/dist/pmtiles.js"></script>
+
+  <style>
+    :root {
+      --encre: #1f2a24;
+      --fond-panneau: rgba(255, 255, 255, 0.95);
+      --trait: #cfd8d2;
+    }
+    html, body { height: 100%; margin: 0; }
+    body {
+      display: flex; flex-direction: column;
+      height: 100dvh;
+      font: 15px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      color: var(--encre);
+    }
+    header { padding: 8px 12px; background: #fff; border-bottom: 1px solid var(--trait); }
+    header h1 { margin: 0; font-size: 1rem; }
+    header p { margin: 2px 0 0; font-size: 0.8rem; color: #4b5a51; }
+
+    /* La carte occupe l'espace restant ; la légende se superpose */
+    #zone { position: relative; flex: 1; min-height: 0; }
+    #carte { position: absolute; inset: 0; }
+
+    /* Légende */
+    #legende {
+      position: absolute; top: 10px; left: 10px; z-index: 2;
+      max-width: min(270px, calc(100% - 70px)); max-height: calc(100% - 20px); overflow: auto;
+      background: var(--fond-panneau); border-radius: 6px; padding: 8px 10px;
+      box-shadow: 0 1px 4px rgba(0, 0, 0, 0.3); font-size: 0.8rem;
+    }
+    #legende summary { cursor: pointer; font-weight: 700; font-size: 0.85rem; }
+    #legende summary:focus-visible { outline: 2px solid #006d2c; outline-offset: 2px; }
+    #legende h2 { margin: 10px 0 4px; font-size: 0.8rem; }
+    #legende ul { list-style: none; margin: 0; padding: 0; }
+    #legende li { display: flex; align-items: center; margin: 3px 0; }
+    #legende p { margin: 8px 0 0; color: #4b5a51; }
+    .pastille { flex: none; width: 16px; height: 16px; margin-right: 8px; border: 1px solid rgba(0, 0, 0, 0.35); }
+    .cercle-legende {
+      flex: none; box-sizing: border-box; border-radius: 50%;
+      background: rgba(43, 108, 176, 0.55); border: 1px solid #0b3a6e;
+    }
+    .zone-cercle { flex: none; display: flex; justify-content: center; margin-right: 8px; }
+
+    /* Fiche d'une commune */
+    .maplibregl-popup-content { padding: 12px 14px; font-size: 0.85rem; }
+    .fiche h2 { margin: 0 24px 0 0; font-size: 1rem; }
+    .fiche .sous-titre { margin: 2px 0 8px; color: #4b5a51; }
+    .fiche dl { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; margin: 0; }
+    .fiche dt { color: #4b5a51; }
+    .fiche dd { margin: 0; }
+
+    /* Message d'erreur de chargement */
+    #message {
+      position: absolute; left: 10px; right: 10px; bottom: 40px; z-index: 3;
+      background: #fff3cd; border: 1px solid #e0c36a; border-radius: 6px; padding: 8px 10px; font-size: 0.85rem;
+    }
+    #message[hidden] { display: none; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Communes du Parc national des Pyrénées</h1>
+    <p id="sous-titre">Territoire en cœur de parc et population. Touchez une commune pour sa fiche.</p>
+  </header>
+
+  <div id="zone">
+    <div id="carte"></div>
+    <details id="legende"><summary>Légende</summary><div id="contenu-legende"></div></details>
+    <div id="message" hidden></div>
+  </div>
+
+  <script type="module">
+    import * as maplibregl from "https://unpkg.com/maplibre-gl@6.16.0/dist/maplibre-gl.mjs";
+
+    // =============================================================================
+    // Réglages de représentation
+    // =============================================================================
+    // Fond : Plan IGN vectoriel (Géoplateforme)
+    const FOND = "https://data.geopf.fr/annexes/ressources/vectorTiles/styles/PLAN.IGN/standard.json";
+
+    // Mention de crédit des données (celle du fond est déclarée dans le contrôle d'attribution de la carte)
+    const CREDIT_DONNEES = "Communes : IGN, ADMIN EXPRESS ; population : INSEE, population municipale ; "
+      + "cœur et aire d’adhésion : DREAL Nouvelle-Aquitaine";
+
+    // Part du territoire communal en cœur de parc (un taux) : aplats par classes, une seule teinte
+    // du clair au foncé. Chaque classe commence à « min » (inclus). Les bornes sont à intervalles
+    // égaux de 15 points et proches des quartiles de la part de cœur des 14 communes concernées
+    // (14,8 ; 30,2 ; 45,2 %), ce qui donne des classes d'effectifs comparables.
+    // Ces bornes sont identiques à BORNES_CLASSES dans communes.py.
+    const CLASSES = [
+      { min: 0,  label: "moins de 15 %", couleur: "#c7e9c0" },
+      { min: 15, label: "de 15 à 30 %",  couleur: "#74c476" },
+      { min: 30, label: "de 30 à 45 %",  couleur: "#31a354" },
+      { min: 45, label: "45 % et plus",  couleur: "#006d2c" },
+    ];
+    // Communes en aire d'adhésion seule (sans cœur) : couleur neutre, hors échelle
+    const COULEUR_AIRE_SEULE = "#dcdcdc";
+
+    // Population (effectif) : cercles proportionnels. C'est la surface du cercle qui est
+    // proportionnelle à la population, donc le rayon à sa racine carrée.
+    // RAYON_MAX : rayon, en pixels, de la commune la plus peuplée.
+    const RAYON_MAX = 24;
+
+    // =============================================================================
+    // 1. Paramètres produits par communes.py (effectif maximal, année, emprise)
+    // =============================================================================
+    const message = document.getElementById("message");
+    function afficherMessage(texte) { message.textContent = texte; message.hidden = false; }
+
+    let params;
+    try {
+      const reponse = await fetch("donnees/parametres.json");
+      if (!reponse.ok) throw new Error("HTTP " + reponse.status);
+      params = await reponse.json();
+    } catch (erreur) {
+      afficherMessage("Impossible de lire donnees/parametres.json : exécuter communes.py, "
+        + "puis ouvrir la page par l’adresse du serveur (serveur.py), pas directement depuis le fichier.");
+      throw erreur;
+    }
+    const annee = params.annee_population.join(" / ");
+    document.getElementById("sous-titre").textContent =
+      params.n_communes + " communes avec du territoire dans le Parc. Touchez-en une pour sa fiche.";
+
+    // =============================================================================
+    // 2. Carte
+    // =============================================================================
+    // Le protocole pmtiles:// permet à MapLibre de lire un fichier PMTiles par morceaux
+    const protocole = new pmtiles.Protocol();
+    maplibregl.addProtocol("pmtiles", protocole.tile);
+
+    const map = new maplibregl.Map({
+      container: "carte",
+      style: FOND,
+      bounds: params.emprise,                     // [ouest, sud, est, nord], cadrage sur les communes retenues
+      fitBoundsOptions: { padding: 24 },
+      attributionControl: { compact: false, customAttribution: "Plan IGN © IGN" },
+    });
+    map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
+    map.addControl(new maplibregl.ScaleControl(), "bottom-left");
+    window.map = map;
+
+    // =============================================================================
+    // 3. Expressions de style
+    // =============================================================================
+    // Couleur : gris neutre si la commune n'a pas de cœur, sinon classe de part de cœur
+    const parClasse = ["step", ["get", "part_coeur_pct"], CLASSES[0].couleur];
+    for (const classe of CLASSES.slice(1)) parClasse.push(classe.min, classe.couleur);
+    const couleurCommune = ["case", ["==", ["get", "en_coeur"], 0], COULEUR_AIRE_SEULE, parClasse];
+
+    // Rayon d'un cercle : RAYON_MAX × racine(population / population maximale)
+    const rayonCercle = ["*", RAYON_MAX, ["sqrt", ["/", ["get", "population"], params.pop_max]]];
+
+    // =============================================================================
+    // 4. Couches, une fois le style du fond chargé
+    // =============================================================================
+    map.on("load", () => {
+      // Les couches sont insérées sous les écritures du Plan IGN pour garder les noms de lieux lisibles.
+      // On repère la plus basse des couches de type « symbol » situées en haut de la pile.
+      const couchesDuStyle = map.getStyle().layers;
+      let ecritures;
+      for (let i = couchesDuStyle.length - 1; i >= 0; i--) {
+        if (couchesDuStyle[i].type !== "symbol") break;
+        ecritures = couchesDuStyle[i].id;
+      }
+
+      // Une source pour les deux couches du fichier PMTiles (« communes » et « centres »)
+      map.addSource("parc", {
+        type: "vector",
+        url: "pmtiles://donnees/communes_parc.pmtiles",
+        attribution: CREDIT_DONNEES,
+      });
+
+      // Aplat : part du territoire en cœur de parc
+      map.addLayer({
+        id: "communes-fond", type: "fill", source: "parc", "source-layer": "communes",
+        paint: { "fill-color": couleurCommune, "fill-opacity": 0.75 },
+      }, ecritures);
+
+      // Contour entre les communes
+      map.addLayer({
+        id: "communes-contour", type: "line", source: "parc", "source-layer": "communes",
+        paint: { "line-color": "#ffffff", "line-width": ["interpolate", ["linear"], ["zoom"], 7, 0.4, 12, 1.3] },
+      }, ecritures);
+
+      // Contour de la commune sélectionnée (filtre vide tant qu'aucune n'est choisie)
+      map.addLayer({
+        id: "selection", type: "line", source: "parc", "source-layer": "communes",
+        filter: ["==", ["get", "code_insee"], ""],
+        paint: { "line-color": "#111111", "line-width": 3 },
+      }, ecritures);
+
+      // Cercles proportionnels : population municipale
+      map.addLayer({
+        id: "population", type: "circle", source: "parc", "source-layer": "centres",
+        // Ordre de tracé : les petits cercles sont dessinés après les grands, donc au-dessus
+        layout: { "circle-sort-key": ["*", -1, ["get", "population"]] },
+        paint: {
+          "circle-radius": rayonCercle,
+          "circle-color": "#2b6cb0", "circle-opacity": 0.55,        // transparence : l'aplat reste lisible
+          "circle-stroke-color": "#0b3a6e", "circle-stroke-width": 1,
+        },
+      }, ecritures);
+
+      // ---------------------------------------------------------------------------
+      // 5. Fiche d'une commune au toucher
+      // ---------------------------------------------------------------------------
+      const nombre = new Intl.NumberFormat("fr-FR", { maximumFractionDigits: 1 });
+      const fiche = new maplibregl.Popup({ maxWidth: "300px", closeOnClick: false });
+      const aucuneSelection = ["==", ["get", "code_insee"], ""];
+      fiche.on("close", () => map.setFilter("selection", aucuneSelection));
+
+      function ajouterLigne(liste, libelle, valeur) {
+        const dt = document.createElement("dt"); dt.textContent = libelle;
+        const dd = document.createElement("dd"); dd.textContent = valeur;
+        liste.append(dt, dd);
+      }
+
+      function construireFiche(p) {
+        // Construction par le DOM et textContent : les valeurs des données sont affichées comme du texte
+        const racine = document.createElement("div"); racine.className = "fiche";
+        const titre = document.createElement("h2"); titre.textContent = p.nom;
+        const sousTitre = document.createElement("p"); sousTitre.className = "sous-titre";
+        sousTitre.textContent = "Département " + p.departement + ", code INSEE " + p.code_insee;
+        const liste = document.createElement("dl");
+        ajouterLigne(liste, "Statut", Number(p.en_coeur) === 1 ? "du cœur de parc" : "aire d’adhésion seulement");
+        ajouterLigne(liste, "Population", nombre.format(p.population) + " hab. (INSEE, " + String(p.date_population).slice(0, 4) + ")");
+        ajouterLigne(liste, "Surface", nombre.format(p.surface_km2) + " km²");
+        ajouterLigne(liste, "En cœur", nombre.format(p.part_coeur_pct) + " % (" + nombre.format(p.coeur_km2) + " km²)");
+        ajouterLigne(liste, "En aire d’adhésion", nombre.format(p.part_aire_pct) + " % (" + nombre.format(p.aire_km2) + " km²)");
+        racine.append(titre, sousTitre, liste);
+        return racine;
+      }
+
+      map.on("click", (e) => {
+        // Entités sous le point touché, la plus haute d'abord : un cercle, sinon la commune
+        const entites = map.queryRenderedFeatures(e.point, { layers: ["population", "communes-fond"] });
+        if (entites.length === 0) { fiche.remove(); return; }
+        const p = entites[0].properties;
+        // La fiche est ajoutée avant le filtre : addTo retire l'ancienne fiche et déclenche « close »,
+        // qui réinitialise la sélection ; le filtre de la nouvelle commune doit être posé après.
+        fiche.setLngLat(e.lngLat).setDOMContent(construireFiche(p)).addTo(map);
+        map.setFilter("selection", ["==", ["get", "code_insee"], p.code_insee]);
+      });
+
+      // Ordinateur : curseur en main au-dessus d'une commune
+      map.on("mousemove", (e) => {
+        const dessus = map.queryRenderedFeatures(e.point, { layers: ["population", "communes-fond"] });
+        map.getCanvas().style.cursor = dessus.length ? "pointer" : "";
+      });
+    });
+
+    // Une erreur sur la source des communes est signalée à l'écran, pas seulement dans la console
+    map.on("error", (e) => {
+      if (e.sourceId === "parc") {
+        afficherMessage("Le fichier donnees/communes_parc.pmtiles ne peut pas être lu : vérifier sa présence "
+          + "et que la page est servie par serveur.py (requêtes par plages d’octets).");
+      }
+    });
+
+    // =============================================================================
+    // 6. Légende, construite à partir des mêmes réglages que la carte
+    // =============================================================================
+    const legende = document.getElementById("legende");
+    legende.open = window.matchMedia("(min-width: 700px)").matches;   // repliée sur petit écran
+
+    // Plus grand 1, 2 ou 5 × 10^k inférieur ou égal à v : valeurs rondes pour les cercles de référence
+    function arrondi(v) {
+      const puissance = 10 ** Math.floor(Math.log10(v));
+      for (const m of [5, 2, 1]) if (m * puissance <= v) return m * puissance;
+      return puissance;
+    }
+    const milliers = new Intl.NumberFormat("fr-FR");
+    const references = [...new Set([params.pop_max, params.pop_max / 5, params.pop_max / 25].map(arrondi))]
+      .filter((v) => v >= 1).sort((a, b) => b - a);
+
+    let html = "<h2>Part du territoire communal en cœur de parc</h2><ul>";
+    html += `<li><span class="pastille" style="background:${COULEUR_AIRE_SEULE}"></span>aucune (aire d’adhésion seule)</li>`;
+    for (const classe of CLASSES) {
+      html += `<li><span class="pastille" style="background:${classe.couleur}"></span>${classe.label}</li>`;
+    }
+    html += `</ul><h2>Population municipale (INSEE, ${annee})</h2><ul>`;
+    for (const v of references) {
+      const diametre = 2 * RAYON_MAX * Math.sqrt(v / params.pop_max);     // même formule que pour les cercles de la carte
+      html += `<li><span class="zone-cercle" style="width:${2 * RAYON_MAX}px">`
+        + `<span class="cercle-legende" style="width:${diametre.toFixed(1)}px;height:${diametre.toFixed(1)}px"></span></span>`
+        + `${milliers.format(v)} habitants</li>`;
+    }
+    html += "</ul><p>Les cercles montrent la population de la commune entière, pas celle du Parc.</p>";
+    document.getElementById("contenu-legende").innerHTML = html;
+  </script>
+</body>
+</html>
+
